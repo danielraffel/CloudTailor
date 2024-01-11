@@ -1,4 +1,5 @@
 # Global variables sample file
+# Note: You may choose to configure and rename this file to variables.txt to avoid config.sh creating and configuring the file with your settings)
 
 # Domain name for the application
 # Example: app_hostname="example.domain.com"
