@@ -1,4 +1,4 @@
-# CloudTailor: Streamlining Docker Deployment on GCP with Cloudflare and OpenAI
+# CloudTailor: Streamlining Docker Deployment on GCP with Cloudflare, Terraform and OpenAI
 
 ## Overview
 
