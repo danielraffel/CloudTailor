@@ -1,4 +1,4 @@
-# Global variables
+# Global variables sample file
 
 # Domain name for the application
 # Example: app_hostname="example.domain.com"
