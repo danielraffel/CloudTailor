@@ -1,5 +1,7 @@
 # CloudTailor: Streamlining Docker Deployment on GCP with Cloudflare, Terraform and OpenAI
 
+[Blog post](https://danielraffel.me/2024/01/12/cloudtailor/) with high-level project walkthrough
+
 ## Overview
 
 This project aims to streamline the setup of a Google Cloud Platform (GCP) VM, specifically tailored for users new to GCP or seeking an easier way to deploy Docker containers so they can try out software. By combining bash and Python scripts, it simplifies the complexities of VM setup, Docker image deployment using Terraform, and establishing a secure Cloudflare Tunnel. Ideal for someone less familiar with GCP, Docker and Terraform, this tool aids in configuring and deploying servers with customized Docker images. It incorporates OpenAI's API for  configuration suggestions based on your software choices, enabling integration of SSL through Cloudflare on your Cloudflare hosted domain.
