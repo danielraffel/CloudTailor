@@ -97,7 +97,7 @@ The Terraform configuration (setup.tf) provisions the following on GCP:
 
 - Run the bash script to configure global variables and prepare the environment.
   ```
-  sh setup.sh
+  sh config.sh
   ```
 
 ### Step 2: Deploy with Terraform
