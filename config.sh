@@ -6,6 +6,83 @@ command_exists() {
     type "$1" &> /dev/null
 }
 
+# Function to ask for confirmation with a variety of Yes/No answers
+ask_confirmation() {
+    local prompt="$1"
+    local yes_responses="y Y yes Yes YES"
+    local no_responses="n N no No NO"
+    local response
+
+    while true; do
+        read -p "$prompt" response
+        for yes in $yes_responses; do
+            if [[ "$response" == "$yes" ]]; then
+                return 0
+            fi
+        done
+        for no in $no_responses; do
+            if [[ "$response" == "$no" ]]; then
+                return 1
+            fi
+        done
+        echo "Please answer 'yes' or 'no'."
+    done
+}
+
+# Function to install Terraform
+install_terraform() {
+    echo "Downloading Terraform..."
+    curl -o /tmp/terraform_1.7.4_darwin_arm64.zip https://releases.hashicorp.com/terraform/1.7.4/terraform_1.7.4_darwin_arm64.zip
+    echo "Installing Terraform..."
+    unzip /tmp/terraform_1.7.4_darwin_arm64.zip -d /tmp
+    sudo mv /tmp/terraform /usr/local/bin/
+    echo "Terraform installed."
+}
+
+# Function to install gcloud
+install_gcloud() {
+    echo "Installing gcloud..."
+    curl https://sdk.cloud.google.com | bash -s -- --disable-prompts
+    export PATH=$PATH:$HOME/google-cloud-sdk/bin
+    source "$HOME/google-cloud-sdk/path.bash.inc"
+    source "$HOME/google-cloud-sdk/completion.bash.inc"
+    echo "gcloud installed."
+}
+
+# Check for necessary CLI tools and offer to install them if not present
+check_cli_tools() {
+    if ! command_exists gcloud; then
+        echo "gcloud CLI is not installed."
+        if ask_confirmation "Do you want to install gcloud? (y/n): "; then
+            install_gcloud
+        else
+            echo "gcloud is required. Exiting."
+            exit 1
+        fi
+    fi
+
+    if ! command_exists terraform; then
+        echo "Terraform is not installed."
+        if ask_confirmation "Do you want to install Terraform? (y/n): "; then
+            install_terraform
+        else
+            echo "Terraform is required. Exiting."
+            exit 1
+        fi
+    fi
+
+    if ! command_exists python3; then
+        echo "Python3 is not installed. Please install Python3 to proceed."
+        exit 1
+    fi
+}
+
+# Checks if a given command exists in the system's PATH.
+# Usage: command_exists <command>
+command_exists() {
+    type "$1" &> /dev/null
+}
+
 # Loads and checks variables from the variables.txt file.
 # Exits the script if any required variables are unset.
 load_variables() {
@@ -127,11 +204,14 @@ if [[ $proceed != "y" ]]; then
     exit 0
 fi
 
-# Checks for the presence of necessary CLI tools.
-if ! command_exists gcloud || ! command_exists terraform || ! command_exists python3; then
-    echo "Please ensure Google CLI, Terraform, Python3, and required PIP packages are installed."
-    exit 1
-fi
+# Checks for the presence of necessary CLI tools
+check_cli_tools
+
+# # Checks for the presence of necessary CLI tools.
+# if ! command_exists gcloud || ! command_exists terraform || ! command_exists python3; then
+#     echo "Please ensure Google CLI, Terraform, Python3, and required PIP packages are installed."
+#     exit 1
+# fi
 
 # Attempt to load variables from the variables.txt file
 if ! load_variables; then
