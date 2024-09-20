@@ -32,9 +32,9 @@ ask_confirmation() {
 # Function to install Terraform
 install_terraform() {
     echo "Downloading Terraform..."
-    curl -o /tmp/terraform_1.7.4_darwin_arm64.zip https://releases.hashicorp.com/terraform/1.7.4/terraform_1.7.4_darwin_arm64.zip
+    curl -o /tmp/terraform_1.9.6_darwin_arm64.zip https://releases.hashicorp.com/terraform/1.9.6/terraform_1.9.6_darwin_arm64.zip
     echo "Installing Terraform..."
-    unzip /tmp/terraform_1.7.4_darwin_arm64.zip -d /tmp
+    unzip /tmp/terraform_1.9.6_darwin_arm64.zip -d /tmp
     sudo mv /tmp/terraform /usr/local/bin/
     echo "Terraform installed."
 }
@@ -77,12 +77,6 @@ check_cli_tools() {
     fi
 }
 
-# Checks if a given command exists in the system's PATH.
-# Usage: command_exists <command>
-command_exists() {
-    type "$1" &> /dev/null
-}
-
 # Loads and checks variables from the variables.txt file.
 # Exits the script if any required variables are unset.
 load_variables() {
@@ -91,10 +85,10 @@ load_variables() {
         source "variables.txt"
 
         # Check for unset required variables
-        if [ -z "$app_hostname" ] || [ -z "$docker_images" ] || [ -z "$region" ] \
+        if [ -z "$app_hostname" ] || [ -z "$region" ] \
            || [ -z "$os_type" ] || [ -z "$server_type" ] || [ -z "$ssh_public_key_path" ] \
-           || [ -z "$OPENAI_API_KEY" ]; then
-            echo "One or more variables are unset in variables.txt. Please fill them out and run the script again (or delete variables.txt.)"
+           || [ -z "$OPENAI_API_KEY" ] || { [ -z "$docker_images" ] && [ -z "$compose_file_path" ]; }; then
+            echo "One or more variables are unset in variables.txt. Please fill them out and run the script again (or delete variables.txt)."
             exit 1
         fi
         return 0
@@ -129,7 +123,7 @@ ask_and_set() {
 prompt_for_region() {
     local confirmed="n"
     while [[ $confirmed != "y" ]]; do
-        echo "\nPlease select the Google Cloud region for your VM:"
+        echo -e "\nPlease select the Google Cloud region for your VM:"
         echo " 1) Oregon: us-west1"
         echo " 2) Iowa: us-central1"
         echo " 3) South Carolina: us-east1"
@@ -151,7 +145,7 @@ prompt_for_server_type() {
     local server_choice
     local server_confirmed="n"
     while [[ $server_confirmed != "y" ]]; do
-        echo "\nSelect the type of GCP server:"
+        echo -e "\nSelect the type of GCP server:"
         echo " 1) e2-micro (FREE)"
         echo " 2) e2-small"
         echo " 3) e2-medium"
@@ -175,7 +169,7 @@ prompt_for_os() {
     local os_choice
     local os_confirmed="n"
     while [[ $os_confirmed != "y" ]]; do
-        echo "\nSelect the OS for your server:"
+        echo -e "\nSelect the OS for your server:"
         echo " 1) ubuntu-os-cloud/ubuntu-2204-lts"
         echo " 2) ubuntu-os-cloud/ubuntu-2004-lts"
         echo " 3) cos-cloud/cos-arm64-109-lts"
@@ -197,7 +191,9 @@ prompt_for_os() {
 }
 
 # Prompts the user to continue with the script execution.
-echo "This script automates the deployment of a Google Cloud VM with the Docker images of your choice.\nA Python script generates a Terraform file and other scripts.\nOpenAI is used to generate the Docker YAML file based on the software you choose to install."
+echo "This script automates the deployment of a Google Cloud VM with the Docker images of your choice."
+echo "A Python script generates a Terraform file and other scripts."
+echo "OpenAI is used to generate the Docker YAML file based on the software you choose to install."
 read -p "Do you want to proceed? (y/n): " proceed
 if [[ $proceed != "y" ]]; then
     echo "Exiting script."
@@ -206,12 +202,6 @@ fi
 
 # Checks for the presence of necessary CLI tools
 check_cli_tools
-
-# # Checks for the presence of necessary CLI tools.
-# if ! command_exists gcloud || ! command_exists terraform || ! command_exists python3; then
-#     echo "Please ensure Google CLI, Terraform, Python3, and required PIP packages are installed."
-#     exit 1
-# fi
 
 # Attempt to load variables from the variables.txt file
 if ! load_variables; then
@@ -232,8 +222,47 @@ if ! load_variables; then
     # Set SSH key paths
     ask_and_set ssh_public_key_path "Please enter the path to your SSH public key:" "for example: ~/.ssh/gcp.pub"
 
-    # Docker images configuration
-    ask_and_set docker_images "Enter Docker images to install (separate multiple with a space: teslamate/teslamate:latest n8nio/n8n):" ""
+    # Docker configuration
+    echo "Choose ONE of the following options to deploy your application:"
+    echo "1. Specify Docker images to install (OpenAI will generate a Docker Compose file)"
+    echo "2. Provide a path to an existing local Docker Compose file"
+    echo "3. Specify Docker images AND provide a path to a local Docker Compose file"
+    read -p "Enter your choice (1, 2, or 3): " docker_choice
+
+    case $docker_choice in
+        1)
+            ask_and_set docker_images "Enter Docker images to install (separate multiple with a space, e.g., teslamate/teslamate:latest n8nio/n8n):" ""
+            compose_file_path=""
+            ;;
+        2)
+            docker_images=""
+            ask_and_set compose_file_path "Enter the path to your local Docker Compose file (e.g., /path/to/docker-compose.yml):" ""
+            if [[ ! $compose_file_path =~ \.(yml|yaml)$ ]]; then
+                echo "Error: The file must have a .yml or .yaml extension."
+                exit 1
+            fi
+            if [ ! -f "$compose_file_path" ]; then
+                echo "Error: The specified Docker Compose file does not exist."
+                exit 1
+            fi
+            ;;
+        3)
+            ask_and_set docker_images "Enter Docker images to install (separate multiple with a space, e.g., teslamate/teslamate:latest n8nio/n8n):" ""
+            ask_and_set compose_file_path "Enter the path to your local Docker Compose file (e.g., /path/to/docker-compose.yml):" ""
+            if [[ ! $compose_file_path =~ \.(yml|yaml)$ ]]; then
+                echo "Error: The file must have a .yml or .yaml extension."
+                exit 1
+            fi
+            if [ ! -f "$compose_file_path" ]; then
+                echo "Error: The specified Docker Compose file does not exist."
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Invalid choice. Please run the script again and choose 1, 2, or 3."
+            exit 1
+            ;;
+    esac
 
     # OpenAI API key configuration
     ask_and_set OPENAI_API_KEY "Please enter your OpenAI API key:" ""
@@ -242,6 +271,7 @@ if ! load_variables; then
     echo "Creating variables.txt with the configuration..."
     echo "app_hostname=\"$app_hostname\"" > variables.txt
     echo "docker_images=\"$docker_images\"" >> variables.txt
+    echo "compose_file_path=\"$compose_file_path\"" >> variables.txt
     echo "region=\"$REGION\"" >> variables.txt
     echo "os_type=\"$OS_TYPE\"" >> variables.txt
     echo "server_type=\"$SERVER_TYPE\"" >> variables.txt

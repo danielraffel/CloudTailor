@@ -5,10 +5,19 @@
 # Example: app_hostname="example.domain.com"
 app_hostname=""
 
-# Docker images to install, separated by space
-# Hosted on https://hub.docker.com/_/docker
-# A Few Examples: docker_images="nginx:latest redis:alpine homebridge/homebridge:latest grafana/grafana:9.5.15-ubuntu homeassistant/home-assistant"
+# Choose ONE of the following options:
+# Note: If you provide Docker images without a Compose file path, OpenAI will attempt to generate a Compose file.
+
+# Option 1: Docker images to install, separated by space (OpenAI will generate a Docker Compose file)
+# Example: docker_images="nginx:latest redis:alpine homebridge/homebridge:latest"
 docker_images=""
+
+# Option 2: Path to your local Docker Compose file (.yml or .yaml)
+# Example: compose_file_path="/path/to/your/docker-compose.yml"
+compose_file_path=""
+
+# Option 3: Specify both Docker images AND a local Docker Compose file path
+# In this case, fill out both docker_images and compose_file_path
 
 # Google Cloud region for the VM
 # Free Tier Options: "us-west1", "us-central1", "us-east1"

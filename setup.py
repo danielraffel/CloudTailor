@@ -2,6 +2,7 @@ import subprocess
 import json
 import yaml
 import os
+import shutil
 from openai import OpenAI
 
 # Load global variables from a file
@@ -27,7 +28,8 @@ vars = load_variables()
 
 # Get variables
 app_hostname = vars.get("app_hostname")
-docker_images = vars.get("docker_images").split()
+docker_images = vars.get("docker_images", "").split()
+compose_file_path = vars.get("compose_file_path")
 region = vars.get("region")
 ssh_public_key_path = vars.get("ssh_public_key_path")
 OPENAI_API_KEY = vars.get("OPENAI_API_KEY")
@@ -53,9 +55,9 @@ def read_ssh_public_key(ssh_public_key_path):
     except Exception as e:
         print(f"Error reading SSH public key file: {e}")
         return None
+
 # Fetch project ID using Google Cloud CLI
 def fetch_project_id():
-# Fetch project ID using Google Cloud CLI
     result = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True)
     return result.stdout.strip()
 
@@ -100,7 +102,6 @@ credentials_path = fetch_service_account_key()
 
 # Format hostname to comply with GCP naming conventions
 def format_hostname(hostname):
-    # Format hostname to comply with GCP naming conventions
     return hostname.replace('.', '-')
 
 # Check for or create a static IP in GCP
@@ -251,51 +252,60 @@ def install_docker_images():
     for image in docker_images:
         subprocess.run(["docker", "pull", image])
 
-# Generate Docker Compose YAML using OpenAI API based on Docker images specified in variables.txt
-def generate_docker_compose_yaml(api_key, docker_images, ssh_user):
-    try:
-        system_message = "You are a helpful assistant designed to output a Docker Compose YAML configuration as a JSON object."
-        user_message = f"Generate a Docker Compose v3 YAML configuration for services with the following Docker images: {', '.join(docker_images)}. Ensure that ports are properly configured for each service. The configuration should be compatible with docker-compose-plugin. Assume files on disk will be saved in /home/{ssh_user}/."
+# Function to copy local Docker Compose file
+def copy_compose_file(source_path):
+    destination_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-compose.yml")
+    shutil.copy2(source_path, destination_path)
+    print(f"Copied Docker Compose file from {source_path} to {destination_path}")
 
-        response = client.chat.completions.create(
-            model="gpt-4-1106-preview",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
-            ]
-        )
+# Generate Docker Compose YAML using OpenAI API or use the provided file
+def generate_docker_compose_yaml(api_key, docker_images, ssh_user, compose_file_path):
+    if compose_file_path:
+        # If a compose file path is provided, copy it
+        copy_compose_file(compose_file_path)
+        with open("docker-compose.yml", "r") as file:
+            return file.read()
+    elif docker_images:
+        try:
+            system_message = "You are a helpful assistant designed to output a Docker Compose YAML configuration as a JSON object."
+            user_message = f"Generate a Docker Compose v3 YAML configuration for services with the following Docker images: {', '.join(docker_images)}. Ensure that ports are properly configured for each service. The configuration should be compatible with docker-compose-plugin. Assume files on disk will be saved in /home/{ssh_user}/."
 
-        # Verbose logging for debugging
-        print("Response received from OpenAI API:", response)
+            response = client.chat.completions.create(
+                model="gpt-4-1106-preview",
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ]
+            )
 
-        # Parse the JSON response
-        docker_compose_json = json.loads(response.choices[0].message.content)
+            # Parse the JSON response
+            docker_compose_json = json.loads(response.choices[0].message.content)
 
-        # Convert JSON to YAML format
-        docker_compose_yaml = yaml.dump(docker_compose_json, sort_keys=False)
+            # Convert JSON to YAML format
+            docker_compose_yaml = yaml.dump(docker_compose_json, sort_keys=False)
 
-        # Check if the response is complete
-        if response.choices[0].finish_reason != "length":
-            create_file("docker-compose.yml", docker_compose_yaml)
-            return docker_compose_yaml  # Return the YAML content
-        else:
-            print("Error: The response was cut off due to length. Please try with a shorter prompt or increase max_tokens.")
+            # Check if the response is complete
+            if response.choices[0].finish_reason != "length":
+                create_file("docker-compose.yml", docker_compose_yaml)
+                return docker_compose_yaml
+            else:
+                print("Error: The response was cut off due to length. Please try with a shorter prompt or increase max_tokens.")
+                return None
+
+        except json.JSONDecodeError as json_err:
+            print(f"JSON Parsing Error: {json_err}")
             return None
-
-    except json.JSONDecodeError as json_err:
-        print(f"JSON Parsing Error: {json_err}")
-        # Additional logging for debugging
-        print("Response causing JSON Parsing Error:", response)
+        except Exception as e:
+            print(f"Error generating Docker Compose YAML: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    else:
+        print("Error: Neither Docker images nor a Compose file path was provided.")
         return None
-    except Exception as e:
-        print(f"Error generating Docker Compose YAML: {e}")
-        # Additional exception details
-        import traceback
-        traceback.print_exc()
-        return None
-
-    # Function to generate the Cloudflare setup script dynamically
+    
+# Function to generate the Cloudflare setup script dynamically
 def generate_cloudflare_script(docker_compose_yaml, formatted_hostname, static_ip, app_hostname):
     # Initialize the ingress entries list
     ingress_entries = []
@@ -353,13 +363,12 @@ systemctl status cloudflared
     # Write the complete script to a file
     create_file("setup_cloudflare.sh", cloudflare_script)
 
+# Create a file with specified content
+def create_file(file_name, content):
+    with open(file_name, "w") as file:
+        file.write(content)
+
 # Main script execution
-vars = load_variables()
-
-# Extract variables
-os_type = vars.get("os_type")
-server_type = vars.get("server_type")
-
 project_id = fetch_project_id()
 credentials_path = fetch_service_account_key()
 static_ip, formatted_hostname = check_static_ip(app_hostname, region)
@@ -377,11 +386,6 @@ ssh_public_key = read_ssh_public_key(ssh_public_key_path)
 if ssh_user is None or ssh_public_key is None:
     print("Error: Unable to extract SSH user or public key from the public key file.")
     exit(1)
-
-# Create a file with specified content
-def create_file(file_name, content):
-    with open(file_name, "w") as file:
-        file.write(content)
 
 # Generate setup_server.sh
 docker_pull_commands = "\n".join([f"docker pull {image}" for image in docker_images])
@@ -460,18 +464,121 @@ sudo docker compose rm
 sudo docker compose -f /opt/docker-compose.yml up -d
 """)
 
-# Generate Docker Compose YAML using OpenAI and store it in docker_compose_yaml variable
+# Generate Docker Compose YAML
 docker_compose_yaml = generate_docker_compose_yaml(OPENAI_API_KEY, docker_images, ssh_user)
 
 if docker_compose_yaml:
     # Generate Cloudflare Script updating ports based on YAML
     generate_cloudflare_script(docker_compose_yaml, formatted_hostname, static_ip, app_hostname)
 else:
-    print("Error: Failed to generate Docker Compose YAML.")
+    print("Error: Failed to generate or copy Docker Compose YAML.")
     exit(1)
 
-# Generate Cloudflare Script updating ports based on YAML
-generate_cloudflare_script(docker_compose_yaml, formatted_hostname, static_ip, app_hostname)
-
 # Generate Terraform configuration
-generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, os_type, server_type)
+generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, vars.get("os_type"), vars.get("server_type"))
+
+# Review and deploy files
+# def review_and_deploy():
+#     print("\nSetup completed. The following files have been generated:")
+#     generated_files = [
+#         "setup.tf",
+#         "setup_server.sh",
+#         "setup_cloudflare.sh",
+#         "docker-compose.yml",
+#         "docker-compose.service",
+#         "updater.sh"
+#     ]
+    
+#     script_dir = os.path.dirname(os.path.abspath(__file__))
+#     for file in generated_files:
+#         file_path = os.path.join(script_dir, file)
+#         if os.path.exists(file_path):
+#             print(f"- {file}: {file_path}")
+
+#     if not compose_file_path and docker_images:
+#         print("\nWARNING: The Docker Compose file was generated by OpenAI. Please review it carefully before deployment.")
+
+#     print("\nPlease review these files carefully before proceeding.")
+    
+#     while True:
+#         choice = input("\nChoose an option:\n1. Exit script (to review files manually)\n2. Proceed with deployment\nEnter your choice (1 or 2): ")
+        
+#         if choice == "1":
+#             print("Exiting script. To deploy later, run the following commands manually:")
+#             print("terraform init")
+#             print("terraform apply")
+#             return
+#         elif choice == "2":
+#             print("Proceeding with deployment...")
+#             try:
+#                 subprocess.run(["terraform", "init"], check=True)
+#                 subprocess.run(["terraform", "apply"], check=True)
+#                 print("Deployment completed successfully.")
+#             except subprocess.CalledProcessError as e:
+#                 print(f"An error occurred during deployment: {e}")
+#             return
+#         else:
+#             print("Invalid choice. Please enter 1 or 2.")
+
+# Option to review files or proceed with deployment and post-deployment steps to set up server and configure Cloudflare tunnel
+def review_and_deploy():
+    print("\nSetup completed. The following files have been generated:")
+    generated_files = [
+        "setup.tf",
+        "setup_server.sh",
+        "setup_cloudflare.sh",
+        "docker-compose.yml",
+        "docker-compose.service",
+        "updater.sh"
+    ]
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for file in generated_files:
+        file_path = os.path.join(script_dir, file)
+        if os.path.exists(file_path):
+            print(f"- {file}: {file_path}")
+
+    if not compose_file_path and docker_images:
+        print("\nWARNING: The Docker Compose file was generated by OpenAI. Please review it carefully before deployment.")
+
+    print("\nPlease review these files carefully before proceeding.")
+    
+    while True:
+        choice = input("\nChoose an option:\n1. Exit script (to review files manually)\n2. Proceed with deployment\nEnter your choice (1 or 2): ")
+        
+        if choice == "1":
+            print("Exiting script. To deploy later, run the following commands manually:")
+            print("terraform init")
+            print("terraform apply")
+            return
+        elif choice == "2":
+            print("Proceeding with deployment...")
+            try:
+                subprocess.run(["terraform", "init"], check=True)
+                result = subprocess.run(["terraform", "apply", "-auto-approve"], capture_output=True, text=True, check=True)
+                print("Deployment completed successfully.")
+                
+                # Extract the IP address from Terraform output
+                output_lines = result.stdout.split('\n')
+                ip_address = next((line.split('=')[1].strip() for line in output_lines if 'instance_ip' in line), None)
+                
+                if ip_address:
+                    print(f"\nYour instance IP address is: {ip_address}")
+                    print("\nNext steps:")
+                    print(f"1. SSH into your new server:")
+                    print(f"   ssh -i {ssh_private_key_path} {ssh_user}@{ip_address}")
+                    print("2. Run the server setup script:")
+                    print("   sudo sh /opt/setup_server.sh")
+                    print("3. Configure Cloudflare Tunnel:")
+                    print("   sudo sh /opt/setup_cloudflare.sh")
+                    print("\nFollow the prompts in each script to complete the setup.")
+                else:
+                    print("Unable to retrieve the instance IP address. Please check the Terraform output manually.")
+            except subprocess.CalledProcessError as e:
+                print(f"An error occurred during deployment: {e}")
+            return
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+
+# Call the review_and_deploy function to allow the user to review files before deployment
+review_and_deploy()
