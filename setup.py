@@ -41,6 +41,14 @@ ssh_private_key_path = vars.get("ssh_private_key_path")
 app_dir = app_hostname.replace('.', '-')  # Replace dots with hyphens for folder name
 os.makedirs(app_dir, exist_ok=True)  # Create the directory if it doesn't exist
 
+# After loading variables from variables.txt
+if dockerfile_path:
+    if os.path.exists(dockerfile_path):
+        shutil.copy2(dockerfile_path, os.path.join(app_dir, "Dockerfile"))
+        print(f"Copied Dockerfile from {dockerfile_path} to {app_dir}.")
+    else:
+        print(f"Warning: Dockerfile not found at {dockerfile_path}. It will not be included in the deployment.")
+
 # Fetch or create a Google Cloud service account key
 def fetch_service_account_key():
     key_filename = os.path.join(app_dir, "service-account-key.json")  # Save in app_dir
