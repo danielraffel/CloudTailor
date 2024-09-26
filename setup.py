@@ -30,40 +30,18 @@ vars = load_variables()
 app_hostname = vars.get("app_hostname")
 docker_images = vars.get("docker_images", "").split()
 compose_file_path = vars.get("compose_file_path")
+dockerfile_path = vars.get("dockerfile_path")
 region = vars.get("region")
 ssh_public_key_path = vars.get("ssh_public_key_path")
 OPENAI_API_KEY = vars.get("OPENAI_API_KEY")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# Determine the SSH username from the SSH public key file
-def get_ssh_user_from_key(ssh_public_key_path):
-    try:
-        with open(ssh_public_key_path, 'r') as file:
-            ssh_key_contents = file.read()
-            # The username is typically the last part of the SSH key line
-            return ssh_key_contents.strip().split()[-1]
-    except Exception as e:
-        print(f"Error reading SSH public key file: {e}")
-        return None
-
-# Read the SSH public key file
-def read_ssh_public_key(ssh_public_key_path):
-    try:
-        with open(ssh_public_key_path, 'r') as file:
-            return file.read().strip()
-    except Exception as e:
-        print(f"Error reading SSH public key file: {e}")
-        return None
-
-# Fetch project ID using Google Cloud CLI
-def fetch_project_id():
-    result = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True)
-    return result.stdout.strip()
+# Create a directory for the app_hostname
+app_dir = app_hostname.replace('.', '-')  # Replace dots with hyphens for folder name
+os.makedirs(app_dir, exist_ok=True)  # Create the directory if it doesn't exist
 
 # Fetch or create a Google Cloud service account key
 def fetch_service_account_key():
-    key_filename = "service-account-key.json"
+    key_filename = os.path.join(app_dir, "service-account-key.json")  # Save in app_dir
 
     # Check if the service account key file already exists
     if os.path.exists(key_filename):
@@ -98,7 +76,35 @@ def fetch_service_account_key():
 
     return key_filename
 
+# Now you can safely call fetch_service_account_key
 credentials_path = fetch_service_account_key()
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Determine the SSH username from the SSH public key file
+def get_ssh_user_from_key(ssh_public_key_path):
+    try:
+        with open(ssh_public_key_path, 'r') as file:
+            ssh_key_contents = file.read()
+            # The username is typically the last part of the SSH key line
+            return ssh_key_contents.strip().split()[-1]
+    except Exception as e:
+        print(f"Error reading SSH public key file: {e}")
+        return None
+
+# Read the SSH public key file
+def read_ssh_public_key(ssh_public_key_path):
+    try:
+        with open(ssh_public_key_path, 'r') as file:
+            return file.read().strip()
+    except Exception as e:
+        print(f"Error reading SSH public key file: {e}")
+        return None
+
+# Fetch project ID using Google Cloud CLI
+def fetch_project_id():
+    result = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True)
+    return result.stdout.strip()
 
 # Format hostname to comply with GCP naming conventions
 def format_hostname(hostname):
@@ -137,8 +143,12 @@ def check_static_ip(hostname, region):
     new_address = json.loads(new_address_result.stdout)
     return new_address["address"], formatted_hostname
 
+# Fetch the service account key and get the filename only
+credentials_path = fetch_service_account_key()
+credentials_filename = os.path.basename(credentials_path)  # Get just the filename
+
 # Generate Terraform configuration for GCP instance
-def generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, os_type, server_type):
+def generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, os_type, server_type, dockerfile_path):
     formatted_hostname = format_hostname(app_hostname)
     ssh_metadata = f"{ssh_user}:{ssh_public_key}"
 
@@ -147,7 +157,7 @@ def generate_terraform_config(project_id, static_ip, credentials_path, ssh_user,
 provider "google" {{
     project     = "{project_id}"
     region      = "{region}"
-    credentials = "{credentials_path}"
+    credentials = "{credentials_filename}"
 }}
 resource "google_compute_instance" "{formatted_hostname}" {{
     name         = "{formatted_hostname}"
@@ -189,12 +199,24 @@ resource "google_compute_instance" "{formatted_hostname}" {{
     }}
     provisioner "file" {{
         source      = "docker-compose.service"
-        destination = "/tmp/docker-compose.service"
+        destination = "/etc/systemd/system/docker-compose.service"
     }}
     provisioner "file" {{
         source      = "updater.sh"
         destination = "/tmp/updater.sh"
     }}
+"""
+
+    # Add Dockerfile if provided
+    if dockerfile_path:
+        config += f"""
+    provisioner "file" {{
+        source      = "{dockerfile_path}"
+        destination = "/tmp/Dockerfile"
+    }}
+"""
+
+    config += f"""
     provisioner "remote-exec" {{
         inline = [
             "sudo mv /tmp/setup_server.sh /opt/setup_server.sh",
@@ -243,8 +265,8 @@ resource "google_compute_firewall" "https-ingress" {{
     # Append the firewall rules to the existing configuration
     config += firewall_rules
 
-    # Write the complete configuration to the Terraform file
-    with open("setup.tf", "w") as file:
+    # Write the complete configuration to the Terraform file in the app directory
+    with open(os.path.join(app_dir, "setup.tf"), "w") as file:
         file.write(config)
 
 # Pull Docker images as specified in variables.txt
@@ -254,7 +276,7 @@ def install_docker_images():
 
 # Function to copy local Docker Compose file
 def copy_compose_file(source_path):
-    destination_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-compose.yml")
+    destination_path = os.path.join(app_dir, "docker-compose.yml")  # Updated path
     shutil.copy2(source_path, destination_path)
     print(f"Copied Docker Compose file from {source_path} to {destination_path}")
 
@@ -263,7 +285,7 @@ def generate_docker_compose_yaml(api_key, docker_images, ssh_user, compose_file_
     if compose_file_path:
         # If a compose file path is provided, copy it
         copy_compose_file(compose_file_path)
-        with open("docker-compose.yml", "r") as file:
+        with open(os.path.join(app_dir, "docker-compose.yml"), "r") as file:  # Updated path
             return file.read()
     elif docker_images:
         try:
@@ -287,7 +309,7 @@ def generate_docker_compose_yaml(api_key, docker_images, ssh_user, compose_file_
 
             # Check if the response is complete
             if response.choices[0].finish_reason != "length":
-                create_file("docker-compose.yml", docker_compose_yaml)
+                create_file(os.path.join(app_dir, "docker-compose.yml"), docker_compose_yaml)  # Updated path
                 return docker_compose_yaml
             else:
                 print("Error: The response was cut off due to length. Please try with a shorter prompt or increase max_tokens.")
@@ -363,14 +385,79 @@ systemctl status cloudflared
     # Write the complete script to a file
     create_file("setup_cloudflare.sh", cloudflare_script)
 
-# Create a file with specified content
+# Create a file with specified content in the app directory
 def create_file(file_name, content):
-    with open(file_name, "w") as file:
+    file_path = os.path.join(app_dir, file_name)  # Create the full path
+    with open(file_path, "w") as file:
         file.write(content)
+
+# Update the review_and_deploy function to reference the new paths
+def review_and_deploy():
+    print("\nSetup completed. The following files have been generated:")
+    generated_files = [
+        "setup.tf",
+        "setup_server.sh",
+        "setup_cloudflare.sh",
+        "docker-compose.yml",
+        "docker-compose.service",
+        "updater.sh"
+    ]
+    
+    # Check if a Dockerfile was added
+    if dockerfile_path:
+        generated_files.append("Dockerfile")
+
+    for file in generated_files:
+        file_path = os.path.join(app_dir, file)  # Update to use the new path
+        if os.path.exists(file_path):
+            print(f"- {file}: {file_path}")
+
+    if not compose_file_path and docker_images:
+        print("\nWARNING: The Docker Compose file was generated by OpenAI. Please review it carefully before deployment.")
+
+    print("\nPlease review these files carefully before proceeding.")
+    
+    while True:
+        choice = input("\nChoose an option:\n1. Exit script (to review files manually)\n2. Proceed with deployment\nEnter your choice (1 or 2): ")
+        
+        if choice == "1":
+            print("Exiting script. To deploy later, run the following commands manually:")
+            print(f"cd {app_dir}")
+            print("terraform init")
+            print("terraform apply")
+            return
+        elif choice == "2":
+            print("Proceeding with deployment...")
+            try:
+                os.chdir(app_dir)  # Change to the app directory
+                subprocess.run(["terraform", "init"], check=True)
+                result = subprocess.run(["terraform", "apply", "-auto-approve"], capture_output=True, text=True, check=True)
+                print("Deployment completed successfully.")
+                
+                # Extract the IP address from Terraform output
+                output_lines = result.stdout.split('\n')
+                ip_address = next((line.split('=')[1].strip() for line in output_lines if 'instance_ip' in line), None)
+                
+                if ip_address:
+                    print(f"\nYour instance IP address is: {ip_address}")
+                    print("\nNext steps:")
+                    print(f"1. SSH into your new server:")
+                    print(f"   ssh -i {ssh_private_key_path} {ssh_user}@{ip_address}")
+                    print("2. Run the server setup script:")
+                    print("   sudo sh /opt/setup_server.sh")
+                    print("3. Configure Cloudflare Tunnel:")
+                    print("   sudo sh /opt/setup_cloudflare.sh")
+                    print("\nFollow the prompts in each script to complete the setup.")
+                else:
+                    print("Unable to retrieve the instance IP address. Please check the Terraform output manually.")
+            except subprocess.CalledProcessError as e:
+                print(f"An error occurred during deployment: {e}")
+            return
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
 
 # Main script execution
 project_id = fetch_project_id()
-credentials_path = fetch_service_account_key()
 static_ip, formatted_hostname = check_static_ip(app_hostname, region)
 ssh_public_key_path = vars.get("ssh_public_key_path")
 ssh_private_key_path = ssh_public_key_path.rsplit('.', 1)[0]
@@ -465,7 +552,7 @@ sudo docker compose -f /opt/docker-compose.yml up -d
 """)
 
 # Generate Docker Compose YAML
-docker_compose_yaml = generate_docker_compose_yaml(OPENAI_API_KEY, docker_images, ssh_user)
+docker_compose_yaml = generate_docker_compose_yaml(OPENAI_API_KEY, docker_images, ssh_user, compose_file_path)
 
 if docker_compose_yaml:
     # Generate Cloudflare Script updating ports based on YAML
@@ -475,110 +562,7 @@ else:
     exit(1)
 
 # Generate Terraform configuration
-generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, vars.get("os_type"), vars.get("server_type"))
-
-# Review and deploy files
-# def review_and_deploy():
-#     print("\nSetup completed. The following files have been generated:")
-#     generated_files = [
-#         "setup.tf",
-#         "setup_server.sh",
-#         "setup_cloudflare.sh",
-#         "docker-compose.yml",
-#         "docker-compose.service",
-#         "updater.sh"
-#     ]
-    
-#     script_dir = os.path.dirname(os.path.abspath(__file__))
-#     for file in generated_files:
-#         file_path = os.path.join(script_dir, file)
-#         if os.path.exists(file_path):
-#             print(f"- {file}: {file_path}")
-
-#     if not compose_file_path and docker_images:
-#         print("\nWARNING: The Docker Compose file was generated by OpenAI. Please review it carefully before deployment.")
-
-#     print("\nPlease review these files carefully before proceeding.")
-    
-#     while True:
-#         choice = input("\nChoose an option:\n1. Exit script (to review files manually)\n2. Proceed with deployment\nEnter your choice (1 or 2): ")
-        
-#         if choice == "1":
-#             print("Exiting script. To deploy later, run the following commands manually:")
-#             print("terraform init")
-#             print("terraform apply")
-#             return
-#         elif choice == "2":
-#             print("Proceeding with deployment...")
-#             try:
-#                 subprocess.run(["terraform", "init"], check=True)
-#                 subprocess.run(["terraform", "apply"], check=True)
-#                 print("Deployment completed successfully.")
-#             except subprocess.CalledProcessError as e:
-#                 print(f"An error occurred during deployment: {e}")
-#             return
-#         else:
-#             print("Invalid choice. Please enter 1 or 2.")
-
-# Option to review files or proceed with deployment and post-deployment steps to set up server and configure Cloudflare tunnel
-def review_and_deploy():
-    print("\nSetup completed. The following files have been generated:")
-    generated_files = [
-        "setup.tf",
-        "setup_server.sh",
-        "setup_cloudflare.sh",
-        "docker-compose.yml",
-        "docker-compose.service",
-        "updater.sh"
-    ]
-    
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    for file in generated_files:
-        file_path = os.path.join(script_dir, file)
-        if os.path.exists(file_path):
-            print(f"- {file}: {file_path}")
-
-    if not compose_file_path and docker_images:
-        print("\nWARNING: The Docker Compose file was generated by OpenAI. Please review it carefully before deployment.")
-
-    print("\nPlease review these files carefully before proceeding.")
-    
-    while True:
-        choice = input("\nChoose an option:\n1. Exit script (to review files manually)\n2. Proceed with deployment\nEnter your choice (1 or 2): ")
-        
-        if choice == "1":
-            print("Exiting script. To deploy later, run the following commands manually:")
-            print("terraform init")
-            print("terraform apply")
-            return
-        elif choice == "2":
-            print("Proceeding with deployment...")
-            try:
-                subprocess.run(["terraform", "init"], check=True)
-                result = subprocess.run(["terraform", "apply", "-auto-approve"], capture_output=True, text=True, check=True)
-                print("Deployment completed successfully.")
-                
-                # Extract the IP address from Terraform output
-                output_lines = result.stdout.split('\n')
-                ip_address = next((line.split('=')[1].strip() for line in output_lines if 'instance_ip' in line), None)
-                
-                if ip_address:
-                    print(f"\nYour instance IP address is: {ip_address}")
-                    print("\nNext steps:")
-                    print(f"1. SSH into your new server:")
-                    print(f"   ssh -i {ssh_private_key_path} {ssh_user}@{ip_address}")
-                    print("2. Run the server setup script:")
-                    print("   sudo sh /opt/setup_server.sh")
-                    print("3. Configure Cloudflare Tunnel:")
-                    print("   sudo sh /opt/setup_cloudflare.sh")
-                    print("\nFollow the prompts in each script to complete the setup.")
-                else:
-                    print("Unable to retrieve the instance IP address. Please check the Terraform output manually.")
-            except subprocess.CalledProcessError as e:
-                print(f"An error occurred during deployment: {e}")
-            return
-        else:
-            print("Invalid choice. Please enter 1 or 2.")
+generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, vars.get("os_type"), vars.get("server_type"), dockerfile_path)
 
 # Call the review_and_deploy function to allow the user to review files before deployment
 review_and_deploy()
