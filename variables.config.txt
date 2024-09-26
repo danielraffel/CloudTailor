@@ -19,6 +19,10 @@ compose_file_path=""
 # Option 3: Specify both Docker images AND a local Docker Compose file path
 # In this case, fill out both docker_images and compose_file_path
 
+# Optional: Path to your local Dockerfile (only used with local Docker Compose in Option 2 and Option 3)
+# Example: dockerfile_path="/path/to/Dockerfile"
+dockerfile_path=""
+
 # Google Cloud region for the VM
 # Free Tier Options: "us-west1", "us-central1", "us-east1"
 region=""
@@ -32,6 +36,9 @@ server_type=""
 # Path to your SSH public key
 # Example: ssh_public_key_path="~/.ssh/your_key_name.pub"
 ssh_public_key_path=""
+
+# Example: ssh_private_key_path="~/.ssh/your_key_name"
+ssh_private_key_path=""
 
 # OpenAI API key
 # Get your API key from https://beta.openai.com/signup/
