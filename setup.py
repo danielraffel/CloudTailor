@@ -3,6 +3,7 @@ import json
 import yaml
 import os
 import shutil
+import openai  # Corrected import
 from openai import OpenAI
 
 # Load global variables from a file
@@ -34,6 +35,7 @@ dockerfile_path = vars.get("dockerfile_path")
 region = vars.get("region")
 ssh_public_key_path = vars.get("ssh_public_key_path")
 OPENAI_API_KEY = vars.get("OPENAI_API_KEY")
+ssh_private_key_path = vars.get("ssh_private_key_path")
 
 # Create a directory for the app_hostname
 app_dir = app_hostname.replace('.', '-')  # Replace dots with hyphens for folder name
@@ -42,10 +44,17 @@ os.makedirs(app_dir, exist_ok=True)  # Create the directory if it doesn't exist
 # Fetch or create a Google Cloud service account key
 def fetch_service_account_key():
     key_filename = os.path.join(app_dir, "service-account-key.json")  # Save in app_dir
+    parent_key_filename = os.path.join(os.path.dirname(app_dir), "service-account-key.json")  # Check in parent directory
 
-    # Check if the service account key file already exists
+    # Check if the service account key file already exists in the app_dir
     if os.path.exists(key_filename):
         print(f"{key_filename} already exists. Skipping key generation.")
+        return key_filename
+
+    # Check if the service account key file exists in the parent directory
+    if os.path.exists(parent_key_filename):
+        print(f"Found service account key in parent directory: {parent_key_filename}. Copying to {app_dir}.")
+        shutil.copy(parent_key_filename, key_filename)
         return key_filename
 
     # Fetch service account details
@@ -79,7 +88,7 @@ def fetch_service_account_key():
 # Now you can safely call fetch_service_account_key
 credentials_path = fetch_service_account_key()
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY  # Corrected the OpenAI client initialization
 
 # Determine the SSH username from the SSH public key file
 def get_ssh_user_from_key(ssh_public_key_path):
@@ -115,7 +124,7 @@ def check_static_ip(hostname, region):
     formatted_hostname = format_hostname(hostname)
     # Check if the static IP exists
     result = subprocess.run(["gcloud", "compute", "addresses", "list", "--filter=NAME=" + formatted_hostname + " AND region:" + region, "--format=json"], capture_output=True, text=True)
-    
+
     if result.returncode != 0:
         # Handle error in listing IPs
         print("Error listing static IPs:", result.stderr)
@@ -143,16 +152,12 @@ def check_static_ip(hostname, region):
     new_address = json.loads(new_address_result.stdout)
     return new_address["address"], formatted_hostname
 
-# Fetch the service account key and get the filename only
-credentials_path = fetch_service_account_key()
-credentials_filename = os.path.basename(credentials_path)  # Get just the filename
-
 # Generate Terraform configuration for GCP instance
-def generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, os_type, server_type, dockerfile_path):
+def generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, os_type, server_type, dockerfile_path, compose_file_path):
     formatted_hostname = format_hostname(app_hostname)
     ssh_metadata = f"{ssh_user}:{ssh_public_key}"
 
-    # Terraform configuration with compute instance details
+    # Start the Terraform configuration
     config = f"""# Terraform configuration for setting up an instance in GCP
 provider "google" {{
     project     = "{project_id}"
@@ -194,10 +199,6 @@ resource "google_compute_instance" "{formatted_hostname}" {{
         destination = "/tmp/setup_cloudflare.sh"
     }}
     provisioner "file" {{
-        source      = "docker-compose.yml"
-        destination = "/tmp/docker-compose.yml"
-    }}
-    provisioner "file" {{
         source      = "docker-compose.service"
         destination = "/tmp/docker-compose.service"
     }}
@@ -207,15 +208,26 @@ resource "google_compute_instance" "{formatted_hostname}" {{
     }}
 """
 
-    # Add Dockerfile if provided
+    # Conditional inclusion based on compose_file_path and dockerfile_path
+    # Include the Docker Compose file if compose_file_path is provided or dockerfile_path is not provided
+    if compose_file_path or not dockerfile_path:
+        config += f"""
+    provisioner "file" {{
+        source      = "docker-compose.yml"
+        destination = "/tmp/docker-compose.yml"
+    }}
+"""
+
+    # Include the Dockerfile if dockerfile_path is provided
     if dockerfile_path:
         config += f"""
     provisioner "file" {{
-        source      = "{dockerfile_path}"
+        source      = "Dockerfile"
         destination = "/tmp/Dockerfile"
     }}
 """
 
+    # Start remote-exec block
     config += f"""
     provisioner "remote-exec" {{
         inline = [
@@ -223,21 +235,30 @@ resource "google_compute_instance" "{formatted_hostname}" {{
             "sudo chmod +x /opt/setup_server.sh",
             "sudo mv /tmp/setup_cloudflare.sh /opt/setup_cloudflare.sh",
             "sudo chmod +x /opt/setup_cloudflare.sh",
-            "sudo mv /tmp/docker-compose.yml /opt/docker-compose.yml",
             "sudo mv /tmp/docker-compose.service /etc/systemd/system/docker-compose.service",
             "sudo chown root:root /etc/systemd/system/docker-compose.service",
             "sudo chmod 644 /etc/systemd/system/docker-compose.service",
             "sudo mv /tmp/updater.sh /opt/updater.sh",
             "sudo chmod +x /opt/updater.sh",
-            "sudo systemctl daemon-reload",
-            "sudo systemctl enable docker-compose.service",
-            "sudo systemctl start docker-compose.service",
+"""
+
+    # Conditionally move Docker Compose file
+    if compose_file_path or not dockerfile_path:
+        config += f"""
+            "sudo mv /tmp/docker-compose.yml /opt/docker-compose.yml",
+"""
+
+    # Conditionally move Dockerfile
+    if dockerfile_path:
+        config += f"""
+            "sudo mv /tmp/Dockerfile /opt/Dockerfile",
+"""
+
+    # Continue with the rest of the commands
+    config += f"""
+            "echo pwd"
         ]
     }}
-}}
-
-output "instance_ip" {{
-    value = "{static_ip}"
 }}
 """
 
@@ -270,6 +291,13 @@ resource "google_compute_firewall" "https-ingress" {{
     # Append the firewall rules to the existing configuration
     config += firewall_rules
 
+    # Output the instance IP
+    config += f"""
+output "instance_ip" {{
+    value = "{static_ip}"
+}}
+"""
+
     # Write the complete configuration to the Terraform file in the app directory
     with open(os.path.join(app_dir, "setup.tf"), "w") as file:
         file.write(config)
@@ -294,35 +322,28 @@ def generate_docker_compose_yaml(api_key, docker_images, ssh_user, compose_file_
             return file.read()
     elif docker_images:
         try:
-            system_message = "You are a helpful assistant designed to output a Docker Compose YAML configuration as a JSON object."
+            system_message = "You are a helpful assistant designed to output a Docker Compose YAML configuration."
             user_message = f"Generate a Docker Compose v3 YAML configuration for services with the following Docker images: {', '.join(docker_images)}. Ensure that ports are properly configured for each service. The configuration should be compatible with docker-compose-plugin. Assume files on disk will be saved in /home/{ssh_user}/."
 
-            response = client.chat.completions.create(
-                model="gpt-4-1106-preview",
-                response_format={"type": "json_object"},
+            response = openai.ChatCompletion.create(
+                model="gpt-4-0613",
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
-                ]
+                ],
+                temperature=0.7,
+                max_tokens=1500,
+                n=1,
+                stop=None
             )
 
-            # Parse the JSON response
-            docker_compose_json = json.loads(response.choices[0].message.content)
+            # Extract the YAML content from the assistant's response
+            docker_compose_yaml = response['choices'][0]['message']['content']
 
-            # Convert JSON to YAML format
-            docker_compose_yaml = yaml.dump(docker_compose_json, sort_keys=False)
+            # Write the YAML content to a file
+            create_file("docker-compose.yml", docker_compose_yaml)  # Updated path
+            return docker_compose_yaml
 
-            # Check if the response is complete
-            if response.choices[0].finish_reason != "length":
-                create_file(os.path.join(app_dir, "docker-compose.yml"), docker_compose_yaml)  # Updated path
-                return docker_compose_yaml
-            else:
-                print("Error: The response was cut off due to length. Please try with a shorter prompt or increase max_tokens.")
-                return None
-
-        except json.JSONDecodeError as json_err:
-            print(f"JSON Parsing Error: {json_err}")
-            return None
         except Exception as e:
             print(f"Error generating Docker Compose YAML: {e}")
             import traceback
@@ -331,12 +352,12 @@ def generate_docker_compose_yaml(api_key, docker_images, ssh_user, compose_file_
     else:
         print("Error: Neither Docker images nor a Compose file path was provided.")
         return None
-    
+
 # Function to generate the Cloudflare setup script dynamically
 def generate_cloudflare_script(docker_compose_yaml, formatted_hostname, static_ip, app_hostname):
     # Initialize the ingress entries list
     ingress_entries = []
-    
+
     # Parse the YAML to find ports
     compose_data = yaml.safe_load(docker_compose_yaml)
     for service_name, service_details in compose_data.get('services', {}).items():
@@ -345,8 +366,8 @@ def generate_cloudflare_script(docker_compose_yaml, formatted_hostname, static_i
             for port in service_details['ports']:
                 # Extract the container port
                 container_port = port.split(':')[1] if ':' in port else port
-                ingress_entries.append(f"echo \"    service: http://localhost:{container_port}\" >> /etc/cloudflared/config.yml")
-    
+                ingress_entries.append(f"echo \"    - hostname: {app_hostname}\\n      service: http://localhost:{container_port}\" >> /etc/cloudflared/config.yml")
+
     # Generate the cloudflare script using the ingress entries
     cloudflare_script = f"""#!/bin/bash
 # Add cloudflare gpg key
@@ -357,23 +378,21 @@ curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/
 echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared jammy main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
 
 # install cloudflared
-sudo apt-get update && sudo apt-get install cloudflared
+sudo apt-get update && sudo apt-get install -y cloudflared
 sudo cloudflared tunnel login
 sudo cloudflared tunnel create {formatted_hostname}
 sudo cloudflared tunnel route ip add {static_ip}/32 {formatted_hostname}
-sudo cloudflared tunnel route dns {formatted_hostname} {app_hostname}
-tunnel_id=$(sudo cloudflared tunnel info {formatted_hostname} | grep -oP 'Your tunnel \K([a-z0-9-]+)')
+tunnel_id=$(sudo cloudflared tunnel info {formatted_hostname} | grep -oP 'id:\\s*\\K[\\w-]+')
 
 # Create config file
-mkdir /etc/cloudflared
-echo "tunnel: {formatted_hostname}" > /etc/cloudflared/config.yml
-echo "credentials-file: /root/.cloudflared/$tunnel_id.json" >> /etc/cloudflared/config.yml
-echo "protocol: quic" >> /etc/cloudflared/config.yml
-echo "logfile: /var/log/cloudflared.log" >> /etc/cloudflared/config.yml
-echo "loglevel: debug" >> /etc/cloudflared/config.yml
-echo "transport-loglevel: info" >> /etc/cloudflared/config.yml
-echo "ingress:" >> /etc/cloudflared/config.yml
-echo "  - hostname: {app_hostname}" >> /etc/cloudflared/config.yml
+sudo mkdir -p /etc/cloudflared
+echo "tunnel: {formatted_hostname}" | sudo tee /etc/cloudflared/config.yml
+echo "credentials-file: /root/.cloudflared/$tunnel_id.json" | sudo tee -a /etc/cloudflared/config.yml
+echo "protocol: quic" | sudo tee -a /etc/cloudflared/config.yml
+echo "logfile: /var/log/cloudflared.log" | sudo tee -a /etc/cloudflared/config.yml
+echo "loglevel: debug" | sudo tee -a /etc/cloudflared/config.yml
+echo "transport-loglevel: info" | sudo tee -a /etc/cloudflared/config.yml
+echo "ingress:" | sudo tee -a /etc/cloudflared/config.yml
 """
 
     # Add ingress entries
@@ -381,10 +400,10 @@ echo "  - hostname: {app_hostname}" >> /etc/cloudflared/config.yml
         cloudflare_script += f"{entry}\n"
 
     # Add the default 404 service and additional commands
-    cloudflare_script += """echo "  - service: http_status:404" >> /etc/cloudflared/config.yml
-cloudflared service install
-systemctl start cloudflared
-systemctl status cloudflared
+    cloudflare_script += """echo "    - service: http_status:404" | sudo tee -a /etc/cloudflared/config.yml
+sudo cloudflared service install
+sudo systemctl start cloudflared
+sudo systemctl status cloudflared
 """
 
     # Write the complete script to a file
@@ -407,7 +426,7 @@ def review_and_deploy():
         "docker-compose.service",
         "updater.sh"
     ]
-    
+
     # Check if a Dockerfile was added
     if dockerfile_path:
         generated_files.append("Dockerfile")
@@ -421,10 +440,10 @@ def review_and_deploy():
         print("\nWARNING: The Docker Compose file was generated by OpenAI. Please review it carefully before deployment.")
 
     print("\nPlease review these files carefully before proceeding.")
-    
+
     while True:
         choice = input("\nChoose an option:\n1. Exit script (to review files manually)\n2. Proceed with deployment\nEnter your choice (1 or 2): ")
-        
+
         if choice == "1":
             print("Exiting script. To deploy later, run the following commands manually:")
             print(f"cd {app_dir}")
@@ -438,11 +457,11 @@ def review_and_deploy():
                 subprocess.run(["terraform", "init"], check=True)
                 result = subprocess.run(["terraform", "apply", "-auto-approve"], capture_output=True, text=True, check=True)
                 print("Deployment completed successfully.")
-                
+
                 # Extract the IP address from Terraform output
                 output_lines = result.stdout.split('\n')
                 ip_address = next((line.split('=')[1].strip() for line in output_lines if 'instance_ip' in line), None)
-                
+
                 if ip_address:
                     print(f"\nYour instance IP address is: {ip_address}")
                     print("\nNext steps:")
@@ -464,8 +483,7 @@ def review_and_deploy():
 # Main script execution
 project_id = fetch_project_id()
 static_ip, formatted_hostname = check_static_ip(app_hostname, region)
-ssh_public_key_path = vars.get("ssh_public_key_path")
-ssh_private_key_path = ssh_public_key_path.rsplit('.', 1)[0]
+ssh_private_key_path = vars.get("ssh_private_key_path")
 
 if static_ip is None or formatted_hostname is None:
     print("Error: Unable to obtain static IP or formatted hostname.")
@@ -479,29 +497,42 @@ if ssh_user is None or ssh_public_key is None:
     print("Error: Unable to extract SSH user or public key from the public key file.")
     exit(1)
 
+# Fetch the service account key and get the filename only
+credentials_path = fetch_service_account_key()
+credentials_filename = os.path.basename(credentials_path)  # Get just the filename
+
 # Generate setup_server.sh
 docker_pull_commands = "\n".join([f"docker pull {image}" for image in docker_images])
+
+# Determine whether to include Docker pull commands based on conditions
+if compose_file_path or dockerfile_path:
+    docker_pull_commands = ""  # Do not include Docker pull commands
+
 create_file("setup_server.sh", f"""#!/bin/bash 
 # Update and Install Dependencies
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl gnupg lsb-release
 
 # Add Docker's official GPG key
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
 # Add the repository to Apt sources
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  $(lsb_release -cs) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 # Update apt repositories
 sudo apt-get update
 
 # Install Docker
-sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 # Start and enable Docker service
-systemctl start docker
-systemctl enable docker
+sudo systemctl start docker
+sudo systemctl enable docker
 
 # Pull Docker images
 {docker_pull_commands}
@@ -513,7 +544,7 @@ cd /opt
 sudo docker compose up -d
 
 # Enable Docker Compose service
-systemctl enable docker-compose.service
+sudo systemctl enable docker-compose.service
 """)
 
 # Generate docker-compose.service
@@ -525,10 +556,10 @@ After=docker.service
 [Service]
 Type=simple
 WorkingDirectory=/opt
-ExecStart=docker compose -f /opt/docker-compose.yml up
-ExecStop=docker compose -f /opt/docker-compose.yml down
+ExecStart=/usr/bin/docker compose -f /opt/docker-compose.yml up
+ExecStop=/usr/bin/docker compose -f /opt/docker-compose.yml down
 Restart=always
-RestartSec="5s"
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
@@ -541,7 +572,7 @@ create_file("updater.sh", f"""#!/bin/bash
 sudo apt update
 
 # Upgrade Docker and Cloudflared
-sudo apt upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin cloudflared
+sudo apt upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin cloudflared
 
 # Pull latest docker images
 {docker_pull_commands}
@@ -550,7 +581,7 @@ sudo apt upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
 sudo docker compose stop
 
 # Delete docker-containers (data is stored separately)
-sudo docker compose rm
+sudo docker compose rm -f
 
 # Start Docker again
 sudo docker compose -f /opt/docker-compose.yml up -d
@@ -567,7 +598,7 @@ else:
     exit(1)
 
 # Generate Terraform configuration
-generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, vars.get("os_type"), vars.get("server_type"), dockerfile_path)
+generate_terraform_config(project_id, static_ip, credentials_path, ssh_user, ssh_public_key, vars.get("os_type"), vars.get("server_type"), dockerfile_path, compose_file_path)
 
 # Call the review_and_deploy function to allow the user to review files before deployment
 review_and_deploy()
