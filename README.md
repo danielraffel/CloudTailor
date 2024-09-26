@@ -22,6 +22,16 @@ Ideal for hobbyists or individuals with basic technical knowledge interested in 
 
 This tool automates and simplifies the process of configuring servers for software experimentation or deployment on the Google Cloud platform. It's designed to eliminate redundancy in server setup and make it more efficient to quickly set up and experiment with software.
 
+### Use Cases
+
+- **For Developers Experimenting with Google Cloud and Docker:** Deploy Docker containers on Google Cloud quickly without needing GCP knowledge. Ideal for those testing out applications in isolated environments.
+  
+- **For Hobbyists Running Personal Projects:** Run your favorite software stacks, like home automation or personal websites, on GCP’s free-tier VMs without worrying about manually setting up the infrastructure.
+
+- **For Small Teams or Startups:** Simplify the setup of cloud servers with secure access via Cloudflare Tunnel. Quickly deploy Docker Compose applications in a repeatable, automated way, making it easier to focus on app development.
+
+- **For Individuals Exploring AI:** Use OpenAI to suggest Docker Compose configurations based on your application needs, removing the complexity of manually writing config files.  
+
 ## Prerequisites
 
 Install and configure the following before running the `config.sh` bash script:
