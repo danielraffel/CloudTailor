@@ -199,7 +199,7 @@ resource "google_compute_instance" "{formatted_hostname}" {{
     }}
     provisioner "file" {{
         source      = "docker-compose.service"
-        destination = "/etc/systemd/system/docker-compose.service"
+        destination = "/tmp/docker-compose.service"
     }}
     provisioner "file" {{
         source      = "updater.sh"
@@ -225,8 +225,13 @@ resource "google_compute_instance" "{formatted_hostname}" {{
             "sudo chmod +x /opt/setup_cloudflare.sh",
             "sudo mv /tmp/docker-compose.yml /opt/docker-compose.yml",
             "sudo mv /tmp/docker-compose.service /etc/systemd/system/docker-compose.service",
+            "sudo chown root:root /etc/systemd/system/docker-compose.service",
+            "sudo chmod 644 /etc/systemd/system/docker-compose.service",
             "sudo mv /tmp/updater.sh /opt/updater.sh",
             "sudo chmod +x /opt/updater.sh",
+            "sudo systemctl daemon-reload",
+            "sudo systemctl enable docker-compose.service",
+            "sudo systemctl start docker-compose.service",
         ]
     }}
 }}
