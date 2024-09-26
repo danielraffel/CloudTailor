@@ -548,6 +548,9 @@ sudo systemctl enable docker
 # Change to the working directory
 cd /opt
 
+# Rebuild Docker images without cache
+sudo docker compose build --no-cache
+
 # Start Docker Compose
 sudo docker compose up -d
 
